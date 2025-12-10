@@ -1,7 +1,11 @@
 import httpx
+import logging
+import json
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class CDEKClient:
@@ -14,70 +18,157 @@ class CDEKClient:
     
     async def _get_token(self) -> str:
         if self._token and self._token_expires_at and datetime.utcnow() < self._token_expires_at:
+            logger.debug("Используется кэшированный токен")
             return self._token
         
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/oauth/token",
-                params={
+        logger.info("Запрос нового токена авторизации")
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/oauth/token"
+                params = {
                     "grant_type": "client_credentials",
                     "client_id": self.client_id,
-                    "client_secret": self.client_secret
+                    "client_secret": "***"  # Скрываем секрет в логах
                 }
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            self._token = data["access_token"]
-            expires_in = data.get("expires_in", 3600)
-            self._token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in - 60)
-            
-            return self._token
+                
+                logger.debug(f"POST {url}")
+                logger.debug(f"Параметры: {params}")
+                
+                response = await client.post(
+                    url,
+                    params={
+                        "grant_type": "client_credentials",
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret
+                    }
+                )
+                
+                logger.debug(f"Статус ответа: {response.status_code}")
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                logger.info(f"✅ Токен получен успешно, expires_in: {data.get('expires_in')}s")
+                logger.debug(f"Ответ API: {json.dumps(data, indent=2, ensure_ascii=False)}")
+                
+                self._token = data["access_token"]
+                expires_in = data.get("expires_in", 3600)
+                self._token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in - 60)
+                
+                return self._token
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ Ошибка HTTP при получении токена: {e.response.status_code}")
+            logger.error(f"Ответ сервера: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка при получении токена: {e}")
+            raise
     
     async def get_tracking_info(self, tracking_code: str) -> Optional[Dict[str, Any]]:
-        token = await self._get_token()
+        logger.info(f"📦 Запрос информации о заказе: {tracking_code}")
         
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.base_url}/orders",
-                headers={"Authorization": f"Bearer {token}"},
-                params={"cdek_number": tracking_code}
-            )
+        try:
+            token = await self._get_token()
             
-            if response.status_code == 404:
-                return None
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data.get("entity"):
-                return None
-            
-            orders = data["entity"]
-            if not orders:
-                return None
-            print(orders)
-            return orders[0]
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/orders"
+                params = {"cdek_number": tracking_code}
+                
+                logger.debug(f"GET {url}")
+                logger.debug(f"Параметры: {params}")
+                logger.debug(f"Authorization: Bearer {token[:20]}...")
+                
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    params=params
+                )
+                
+                logger.debug(f"Статус ответа: {response.status_code}")
+                
+                if response.status_code == 404:
+                    logger.warning(f"⚠️ Заказ {tracking_code} не найден (404)")
+                    return None
+                
+                if response.status_code == 400:
+                    error_data = response.json()
+                    logger.warning(f"⚠️ Ошибка 400 для заказа {tracking_code}")
+                    logger.warning(f"Детали: {json.dumps(error_data, indent=2, ensure_ascii=False)}")
+                    
+                    # Проверяем на forbidden
+                    if "v2_entity_forbidden" in str(error_data):
+                        logger.warning(
+                            f"💡 Заказ {tracking_code} запрещен для доступа. "
+                            f"Возможные причины:\n"
+                            f"  1. Заказ принадлежит другому аккаунту\n"
+                            f"  2. Используется тестовый API для продакшн заказа (или наоборот)\n"
+                            f"  3. Неверный формат трек-номера"
+                        )
+                    return None
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                logger.debug(f"Полный ответ API:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+                
+                if not data.get("entity"):
+                    logger.warning(f"⚠️ Пустой ответ для заказа {tracking_code}")
+                    return None
+                
+                orders = data["entity"]
+                if not orders:
+                    logger.warning(f"⚠️ Нет данных о заказе {tracking_code}")
+                    return None
+                
+                order = orders[0]
+                logger.info(f"✅ Информация о заказе {tracking_code} получена")
+                logger.info(f"   UUID: {order.get('uuid')}")
+                logger.info(f"   Статусов: {len(order.get('statuses', []))}")
+                
+                return order
+        except httpx.HTTPStatusError as e:
+            logger.error(f"❌ Ошибка HTTP при запросе заказа {tracking_code}: {e.response.status_code}")
+            logger.error(f"Ответ сервера: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка при запросе заказа {tracking_code}: {e}")
+            raise
     
     async def get_order_statuses(self, tracking_code: str) -> List[Dict[str, Any]]:
+        logger.info(f"📊 Получение статусов для заказа: {tracking_code}")
+        
         order_info = await self.get_tracking_info(tracking_code)
         
         if not order_info:
+            logger.warning(f"⚠️ Не удалось получить информацию о заказе {tracking_code}")
             return []
         
         statuses = order_info.get("statuses", [])
+        logger.info(f"Найдено статусов: {len(statuses)}")
         
         result = []
-        for status in statuses:
-            result.append({
+        for idx, status in enumerate(statuses, 1):
+            status_data = {
                 "code": status.get("code", ""),
                 "name": status.get("name", ""),
                 "datetime": status.get("date_time", ""),
                 "city": status.get("city", ""),
                 "reason_code": status.get("reason_code"),
                 "reason": status.get("reason")
-            })
-        print(result)
+            }
+            result.append(status_data)
+            
+            logger.debug(f"Статус #{idx}:")
+            logger.debug(f"  Код: {status_data['code']}")
+            logger.debug(f"  Название: {status_data['name']}")
+            logger.debug(f"  Время: {status_data['datetime']}")
+            logger.debug(f"  Город: {status_data['city']}")
+            if status_data['reason']:
+                logger.debug(f"  Причина: {status_data['reason']}")
+        
+        logger.info(f"✅ Обработано статусов: {len(result)}")
+        
         return result
 
 
