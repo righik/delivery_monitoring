@@ -1,0 +1,16 @@
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite3
+.env
+.git
+.gitignore
+.idea
+.vscode
+*.log
+alembic/versions/*.pyc

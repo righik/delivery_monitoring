@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: delivery_user
+      POSTGRES_PASSWORD: delivery_pass
+      POSTGRES_DB: delivery_monitoring
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delivery_user -d delivery_monitoring"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  init:
+    build: .
+    command: >
+      sh -c "echo '⏳ Ожидание БД...' &&
+             sleep 5 &&
+             echo '📊 Запуск миграций...' &&
+             alembic upgrade head &&
+             echo '🚀 Инициализация тестовых данных...' &&
+             python docker_init.py"
+    environment:
+      - DATABASE_URL=postgresql://delivery_user:delivery_pass@db/delivery_monitoring
+      - CDEK_CLIENT_ID=${CDEK_CLIENT_ID}
+      - CDEK_CLIENT_SECRET=${CDEK_CLIENT_SECRET}
+      - CDEK_API_URL=${CDEK_API_URL:-https://api.edu.cdek.ru/v2}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://delivery_user:delivery_pass@db/delivery_monitoring
+      - CDEK_CLIENT_ID=${CDEK_CLIENT_ID}
+      - CDEK_CLIENT_SECRET=${CDEK_CLIENT_SECRET}
+      - CDEK_API_URL=${CDEK_API_URL:-https://api.edu.cdek.ru/v2}
+    depends_on:
+      db:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
