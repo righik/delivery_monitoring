@@ -110,22 +110,37 @@ class CDEKClient:
                 response.raise_for_status()
                 data = response.json()
                 
-                logger.debug(f"Полный ответ API:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+                logger.info(f"Полный ответ API:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
                 
                 if not data.get("entity"):
                     logger.warning(f"⚠️ Пустой ответ для заказа {tracking_code}")
+                    logger.warning(f"Структура ответа: {list(data.keys())}")
                     return None
                 
-                orders = data["entity"]
-                if not orders:
-                    logger.warning(f"⚠️ Нет данных о заказе {tracking_code}")
-                    return None
+                entity = data["entity"]
                 
-                order = orders[0]
+                # API может вернуть либо список заказов, либо один объект
+                if isinstance(entity, dict):
+                    # Один заказ (при поиске по im_number или uuid)
+                    order = entity
+                    logger.debug(f"Получен один заказ (dict)")
+                elif isinstance(entity, list):
+                    # Массив заказов (при поиске по cdek_number)
+                    if not entity:
+                        logger.warning(f"⚠️ Пустой список заказов для {tracking_code}")
+                        logger.warning(f"Полный ответ: {json.dumps(data, indent=2, ensure_ascii=False)}")
+                        return None
+                    order = entity[0]
+                    logger.debug(f"Получен массив заказов, взят первый")
+                else:
+                    logger.error(f"❌ Неожиданный тип entity: {type(entity)}")
+                    logger.error(f"Содержимое entity: {entity}")
+                    return None
                 logger.info(f"✅ Информация о заказе {tracking_code} получена")
                 logger.info(f"   UUID: {order.get('uuid')}")
+                logger.info(f"   Номер СДЭК: {order.get('cdek_number', 'не присвоен')}")
+                logger.info(f"   Номер ИМ: {order.get('number', 'нет')}")
                 logger.info(f"   Статусов: {len(order.get('statuses', []))}")
-                
                 return order
         except httpx.HTTPStatusError as e:
             logger.error(f"❌ Ошибка HTTP при запросе заказа {tracking_code}: {e.response.status_code}")
@@ -133,6 +148,9 @@ class CDEKClient:
             raise
         except Exception as e:
             logger.error(f"❌ Неожиданная ошибка при запросе заказа {tracking_code}: {e}")
+            logger.error(f"Тип ошибки: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback:\n{traceback.format_exc()}")
             raise
     
     async def get_order_statuses(self, tracking_code: str) -> List[Dict[str, Any]]:
